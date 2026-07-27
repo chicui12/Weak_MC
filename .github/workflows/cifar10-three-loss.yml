@@ -1,0 +1,94 @@
+name: CIFAR-10 three weak-label losses
+
+on:
+  push:
+    branches:
+      - experiment/cifar10-three-loss-fair-20260727
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  experiment:
+    name: ${{ matrix.method }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        method: [ishida_ga, scarce, clwl]
+
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Unpack audited experiment code
+        shell: bash
+        run: |
+          mkdir -p experiments/cifar10_three_loss
+          base64 --decode experiments/cifar10_three_loss_payload.b64 > /tmp/cifar10_three_loss.zip
+          unzip -q /tmp/cifar10_three_loss.zip -d experiments/cifar10_three_loss
+          ls -la experiments/cifar10_three_loss
+
+      - name: Install CPU PyTorch and plotting dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy matplotlib pillow
+
+      - name: Show runner resources
+        shell: bash
+        run: |
+          nproc
+          lscpu | sed -n '1,25p'
+          free -h
+          python - <<'PY'
+          import torch, torchvision
+          print('torch', torch.__version__)
+          print('torchvision', torchvision.__version__)
+          print('threads', torch.get_num_threads())
+          PY
+
+      - name: Run implementation audits
+        working-directory: experiments/cifar10_three_loss
+        run: python test_losses.py
+
+      - name: Run one-seed 80-epoch experiment
+        working-directory: experiments/cifar10_three_loss
+        shell: bash
+        env:
+          OMP_NUM_THREADS: '4'
+          MKL_NUM_THREADS: '4'
+        run: |
+          THREADS=$(nproc)
+          if [ "$THREADS" -gt 4 ]; then THREADS=4; fi
+          python run_experiment.py \
+            --methods "${{ matrix.method }}" \
+            --data-root ./data \
+            --output-dir ./results \
+            --epochs 80 \
+            --batch-size 128 \
+            --learning-rate 1e-3 \
+            --weight-decay 1e-4 \
+            --eval-every 5 \
+            --num-workers 2 \
+            --torch-threads "$THREADS" \
+            --device cpu \
+            --seed 0
+
+      - name: Upload method result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cifar10-${{ matrix.method }}-seed0-results
+          path: experiments/cifar10_three_loss/results
+          if-no-files-found: warn
+          retention-days: 14
