@@ -50,10 +50,10 @@ jobs:
         run: |
           mkdir -p experiments/cifar10_three_loss
           cat experiments/cifar10_payload_parts/part*.txt > /tmp/cifar10_three_loss.b64
-          test "$(wc -c < /tmp/cifar10_three_loss.b64)" -eq 20992
-          printf '%s  %s\n' '2e34bc62301ad6d4c004a78ee38ad628a7d4f2ede756644a461aa8b8ed789706' '/tmp/cifar10_three_loss.b64' | sha256sum --check --strict
+          test "$(wc -c < /tmp/cifar10_three_loss.b64)" -eq 21000
+          printf '%s  %s\n' '69df9351052ecd9a83c46114a72cee086a54b37e448d5dc0398ff15037ac89ff' '/tmp/cifar10_three_loss.b64' | sha256sum --check --strict
           base64 --decode /tmp/cifar10_three_loss.b64 > /tmp/cifar10_three_loss.zip
-          printf '%s  %s\n' 'cfa19cf4d06a8d0328cb391399e487e8b1f0439563f2ca0841f15f80519bb67a' '/tmp/cifar10_three_loss.zip' | sha256sum --check --strict
+          printf '%s  %s\n' 'd49b65ac692bab0e1741a460545370add5a0b8d2335b0e82e683998af796d0b3' '/tmp/cifar10_three_loss.zip' | sha256sum --check --strict
           unzip -q /tmp/cifar10_three_loss.zip -d experiments/cifar10_three_loss
           ls -la experiments/cifar10_three_loss
 
