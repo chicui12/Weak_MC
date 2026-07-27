@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - experiment/cifar10-three-loss-fair-20260727
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
 
 permissions:
