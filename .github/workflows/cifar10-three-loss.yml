@@ -32,11 +32,15 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Unpack audited experiment code
+      - name: Unpack and verify audited experiment code
         shell: bash
         run: |
           mkdir -p experiments/cifar10_three_loss
-          base64 --decode experiments/cifar10_three_loss_payload.b64 > /tmp/cifar10_three_loss.zip
+          cat experiments/cifar10_payload_parts/part*.txt > /tmp/cifar10_three_loss.b64
+          test "$(wc -c < /tmp/cifar10_three_loss.b64)" -eq 19480
+          printf '%s  %s\n' '43aa855a031d1e7ea685a49c1dc2a9df1e5354fc4a92b4255ec2ec5f7157cf90' '/tmp/cifar10_three_loss.b64' | sha256sum --check --strict
+          base64 --decode /tmp/cifar10_three_loss.b64 > /tmp/cifar10_three_loss.zip
+          printf '%s  %s\n' 'b54289d4cc5d81829e601c367dc222b14c01b8597ad614f6a75bfba14f9f3d7e' '/tmp/cifar10_three_loss.zip' | sha256sum --check --strict
           unzip -q /tmp/cifar10_three_loss.zip -d experiments/cifar10_three_loss
           ls -la experiments/cifar10_three_loss
 
@@ -94,4 +98,66 @@ jobs:
           name: cifar10-${{ matrix.method }}-seed0-results
           path: experiments/cifar10_three_loss/results
           if-no-files-found: warn
+          retention-days: 14
+
+  aggregate:
+    name: aggregate-results
+    if: always()
+    needs: experiment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download method artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cifar10-*-seed0-results
+          path: downloaded
+
+      - name: Print and save concise combined summary
+        shell: bash
+        run: |
+          python - <<'PY'
+          import csv
+          import json
+          from pathlib import Path
+
+          summaries = []
+          for path in sorted(Path('downloaded').rglob('summary.json')):
+              payload = json.loads(path.read_text())
+              if isinstance(payload, dict) and 'summaries' in payload:
+                  summaries.extend(payload['summaries'])
+              elif isinstance(payload, list):
+                  summaries.extend(payload)
+              else:
+                  summaries.append(payload)
+          summaries.sort(key=lambda row: row.get('method', ''))
+          Path('combined_summaries.json').write_text(
+              json.dumps(summaries, indent=2, sort_keys=True) + '\n'
+          )
+          fields = [
+              'method', 'display_name', 'seed', 'epochs',
+              'final_clean_train_accuracy', 'final_clean_test_accuracy',
+              'final_online_clean_train_accuracy', 'best_observed_test_accuracy',
+              'final_objective', 'mean_correction_fraction',
+              'mean_negative_component_fraction',
+              'total_skipped_incomplete_batches', 'mean_epoch_seconds',
+              'total_train_seconds'
+          ]
+          with Path('combined_summaries.csv').open('w', newline='') as handle:
+              writer = csv.DictWriter(handle, fieldnames=fields)
+              writer.writeheader()
+              for row in summaries:
+                  writer.writerow({key: row.get(key) for key in fields})
+          print('COMBINED_FINAL_SUMMARY')
+          print(json.dumps(summaries, indent=2, sort_keys=True))
+          if len(summaries) != 3:
+              raise SystemExit(f'Expected 3 summaries, found {len(summaries)}')
+          PY
+
+      - name: Upload combined result
+        uses: actions/upload-artifact@v4
+        with:
+          name: cifar10-three-method-combined-seed0
+          path: |
+            combined_summaries.json
+            combined_summaries.csv
           retention-days: 14
