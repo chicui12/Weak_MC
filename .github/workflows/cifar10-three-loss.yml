@@ -21,8 +21,24 @@ jobs:
         method: [ishida_ga, scarce, clwl]
 
     steps:
-      - name: Check out branch
+      - name: Check out experiment branch
         uses: actions/checkout@v4
+
+      - name: Check out CIFAR-10 Python-batch mirror
+        uses: actions/checkout@v4
+        with:
+          repository: rubentea16/Image-Classification-LeNet5-CIFAR10
+          ref: master
+          path: cifar10-mirror
+          fetch-depth: 1
+          sparse-checkout: |
+            data_batch_1
+            data_batch_2
+            data_batch_3
+            data_batch_4
+            data_batch_5
+            test_batch
+          sparse-checkout-cone-mode: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -34,10 +50,10 @@ jobs:
         run: |
           mkdir -p experiments/cifar10_three_loss
           cat experiments/cifar10_payload_parts/part*.txt > /tmp/cifar10_three_loss.b64
-          test "$(wc -c < /tmp/cifar10_three_loss.b64)" -eq 19480
-          printf '%s  %s\n' '43aa855a031d1e7ea685a49c1dc2a9df1e5354fc4a92b4255ec2ec5f7157cf90' '/tmp/cifar10_three_loss.b64' | sha256sum --check --strict
+          test "$(wc -c < /tmp/cifar10_three_loss.b64)" -eq 20992
+          printf '%s  %s\n' '2e34bc62301ad6d4c004a78ee38ad628a7d4f2ede756644a461aa8b8ed789706' '/tmp/cifar10_three_loss.b64' | sha256sum --check --strict
           base64 --decode /tmp/cifar10_three_loss.b64 > /tmp/cifar10_three_loss.zip
-          printf '%s  %s\n' 'b54289d4cc5d81829e601c367dc222b14c01b8597ad614f6a75bfba14f9f3d7e' '/tmp/cifar10_three_loss.zip' | sha256sum --check --strict
+          printf '%s  %s\n' 'cfa19cf4d06a8d0328cb391399e487e8b1f0439563f2ca0841f15f80519bb67a' '/tmp/cifar10_three_loss.zip' | sha256sum --check --strict
           unzip -q /tmp/cifar10_three_loss.zip -d experiments/cifar10_three_loss
           ls -la experiments/cifar10_three_loss
 
@@ -47,6 +63,29 @@ jobs:
           python -m pip install --upgrade --quiet pip
           python -m pip install --quiet torch torchvision --index-url https://download.pytorch.org/whl/cpu
           python -m pip install --quiet numpy matplotlib pillow
+
+      - name: Copy and checksum-verify exact CIFAR-10 batch files
+        shell: bash
+        run: |
+          mkdir -p experiments/cifar10_three_loss/data/cifar-10-batches-py
+          cp cifar10-mirror/data_batch_1 \
+             cifar10-mirror/data_batch_2 \
+             cifar10-mirror/data_batch_3 \
+             cifar10-mirror/data_batch_4 \
+             cifar10-mirror/data_batch_5 \
+             cifar10-mirror/test_batch \
+             experiments/cifar10_three_loss/data/cifar-10-batches-py/
+          cat > /tmp/cifar10.md5 <<'EOF'
+          c99cafc152244af753f735de768cd75f  data_batch_1
+          d4bba439e000b95fd0a9bffe97cbabec  data_batch_2
+          54ebc095f3ab1f0389bbae665268c751  data_batch_3
+          634d18415352ddfa80567beed471001a  data_batch_4
+          482c414d41f54cd18b22e5b47cb7c3cb  data_batch_5
+          40351d587109b95175f43aff81a1287e  test_batch
+          EOF
+          cd experiments/cifar10_three_loss/data/cifar-10-batches-py
+          md5sum --check --strict /tmp/cifar10.md5
+          ls -lh
 
       - name: Show runner resources
         shell: bash
@@ -78,6 +117,8 @@ jobs:
           python run_experiment.py \
             --methods "${{ matrix.method }}" \
             --data-root ./data \
+            --cifar-python-dir ./data/cifar-10-batches-py \
+            --no-download \
             --output-dir ./results \
             --epochs 80 \
             --batch-size 128 \
