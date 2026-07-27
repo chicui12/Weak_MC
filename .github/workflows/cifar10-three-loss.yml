@@ -1,0 +1,207 @@
+name: CIFAR-10 three weak-label losses
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  experiment:
+    name: ${{ matrix.method }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        method: [ishida_ga, scarce, clwl]
+
+    steps:
+      - name: Check out experiment branch
+        uses: actions/checkout@v4
+
+      - name: Check out CIFAR-10 Python-batch mirror
+        uses: actions/checkout@v4
+        with:
+          repository: rubentea16/Image-Classification-LeNet5-CIFAR10
+          ref: master
+          path: cifar10-mirror
+          fetch-depth: 1
+          sparse-checkout: |
+            data_batch_1
+            data_batch_2
+            data_batch_3
+            data_batch_4
+            data_batch_5
+            test_batch
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Unpack and verify audited experiment code
+        shell: bash
+        run: |
+          mkdir -p experiments/cifar10_three_loss
+          cat experiments/cifar10_payload_parts/part*.txt > /tmp/cifar10_three_loss.b64
+          test "$(wc -c < /tmp/cifar10_three_loss.b64)" -eq 21000
+          printf '%s  %s\n' '69df9351052ecd9a83c46114a72cee086a54b37e448d5dc0398ff15037ac89ff' '/tmp/cifar10_three_loss.b64' | sha256sum --check --strict
+          base64 --decode /tmp/cifar10_three_loss.b64 > /tmp/cifar10_three_loss.zip
+          printf '%s  %s\n' 'd49b65ac692bab0e1741a460545370add5a0b8d2335b0e82e683998af796d0b3' '/tmp/cifar10_three_loss.zip' | sha256sum --check --strict
+          unzip -q /tmp/cifar10_three_loss.zip -d experiments/cifar10_three_loss
+          ls -la experiments/cifar10_three_loss
+
+      - name: Install CPU PyTorch and plotting dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade --quiet pip
+          python -m pip install --quiet torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install --quiet numpy matplotlib pillow
+
+      - name: Copy and checksum-verify exact CIFAR-10 batch files
+        shell: bash
+        run: |
+          mkdir -p experiments/cifar10_three_loss/data/cifar-10-batches-py
+          cp cifar10-mirror/data_batch_1 \
+             cifar10-mirror/data_batch_2 \
+             cifar10-mirror/data_batch_3 \
+             cifar10-mirror/data_batch_4 \
+             cifar10-mirror/data_batch_5 \
+             cifar10-mirror/test_batch \
+             experiments/cifar10_three_loss/data/cifar-10-batches-py/
+          cat > /tmp/cifar10.md5 <<'EOF'
+          c99cafc152244af753f735de768cd75f  data_batch_1
+          d4bba439e000b95fd0a9bffe97cbabec  data_batch_2
+          54ebc095f3ab1f0389bbae665268c751  data_batch_3
+          634d18415352ddfa80567beed471001a  data_batch_4
+          482c414d41f54cd18b22e5b47cb7c3cb  data_batch_5
+          40351d587109b95175f43aff81a1287e  test_batch
+          EOF
+          cd experiments/cifar10_three_loss/data/cifar-10-batches-py
+          md5sum --check --strict /tmp/cifar10.md5
+          ls -lh
+
+      - name: Show runner resources
+        shell: bash
+        run: |
+          nproc
+          lscpu | sed -n '1,25p'
+          free -h
+          python - <<'PY'
+          import torch, torchvision
+          print('torch', torch.__version__)
+          print('torchvision', torchvision.__version__)
+          print('threads', torch.get_num_threads())
+          PY
+
+      - name: Run implementation audits
+        working-directory: experiments/cifar10_three_loss
+        run: python test_losses.py
+
+      - name: Run one-seed 80-epoch experiment
+        working-directory: experiments/cifar10_three_loss
+        shell: bash
+        env:
+          OMP_NUM_THREADS: '4'
+          MKL_NUM_THREADS: '4'
+        run: |
+          set -o pipefail
+          THREADS=$(nproc)
+          if [ "$THREADS" -gt 4 ]; then THREADS=4; fi
+          python run_experiment.py \
+            --methods "${{ matrix.method }}" \
+            --data-root ./data \
+            --cifar-python-dir ./data/cifar-10-batches-py \
+            --no-download \
+            --output-dir ./results \
+            --epochs 80 \
+            --batch-size 128 \
+            --learning-rate 1e-3 \
+            --weight-decay 1e-4 \
+            --eval-every 5 \
+            --num-workers 2 \
+            --torch-threads "$THREADS" \
+            --device cpu \
+            --seed 0 2>&1 | tee training.log
+
+      - name: Upload method result and diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cifar10-${{ matrix.method }}-seed0-results
+          path: |
+            experiments/cifar10_three_loss/results
+            experiments/cifar10_three_loss/training.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  aggregate:
+    name: aggregate-results
+    if: always()
+    needs: experiment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download method artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cifar10-*-seed0-results
+          path: downloaded
+
+      - name: Print diagnostics and aggregate completed results
+        shell: bash
+        run: |
+          set -e
+          echo '=== METHOD LOG TAILS ==='
+          find downloaded -name training.log -print0 | sort -z | while IFS= read -r -d '' log; do
+            echo "--- $log ---"
+            tail -n 30 "$log"
+          done
+          python - <<'PY'
+          import csv
+          import json
+          from pathlib import Path
+
+          summaries = []
+          for path in sorted(Path('downloaded').rglob('summary.json')):
+              payload = json.loads(path.read_text())
+              summaries.extend(payload if isinstance(payload, list) else [payload])
+          summaries.sort(key=lambda row: row.get('method', ''))
+          Path('combined_summaries.json').write_text(
+              json.dumps(summaries, indent=2, sort_keys=True) + '\n'
+          )
+          fields = [
+              'method', 'display_name', 'seed', 'epochs',
+              'final_clean_train_accuracy', 'final_clean_test_accuracy',
+              'final_online_clean_train_accuracy', 'best_observed_test_accuracy',
+              'final_objective', 'mean_correction_fraction',
+              'mean_negative_component_fraction',
+              'total_skipped_incomplete_batches', 'mean_epoch_seconds',
+              'total_train_seconds'
+          ]
+          with Path('combined_summaries.csv').open('w', newline='') as handle:
+              writer = csv.DictWriter(handle, fieldnames=fields)
+              writer.writeheader()
+              for row in summaries:
+                  writer.writerow({key: row.get(key) for key in fields})
+          print('COMBINED_FINAL_SUMMARY')
+          print(json.dumps(summaries, indent=2, sort_keys=True))
+          if len(summaries) != 3:
+              raise SystemExit(f'Expected 3 successful summaries, found {len(summaries)}')
+          PY
+
+      - name: Upload combined result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cifar10-three-method-combined-seed0
+          path: |
+            combined_summaries.json
+            combined_summaries.csv
+          if-no-files-found: warn
+          retention-days: 14
