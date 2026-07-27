@@ -1,9 +1,6 @@
 name: CIFAR-10 three weak-label losses
 
 on:
-  push:
-    branches:
-      - experiment/cifar10-three-loss-fair-20260727
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
@@ -47,9 +44,9 @@ jobs:
       - name: Install CPU PyTorch and plotting dependencies
         shell: bash
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install numpy matplotlib pillow
+          python -m pip install --upgrade --quiet pip
+          python -m pip install --quiet torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install --quiet numpy matplotlib pillow
 
       - name: Show runner resources
         shell: bash
@@ -75,6 +72,7 @@ jobs:
           OMP_NUM_THREADS: '4'
           MKL_NUM_THREADS: '4'
         run: |
+          set -o pipefail
           THREADS=$(nproc)
           if [ "$THREADS" -gt 4 ]; then THREADS=4; fi
           python run_experiment.py \
@@ -89,14 +87,16 @@ jobs:
             --num-workers 2 \
             --torch-threads "$THREADS" \
             --device cpu \
-            --seed 0
+            --seed 0 2>&1 | tee training.log
 
-      - name: Upload method result
+      - name: Upload method result and diagnostic log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: cifar10-${{ matrix.method }}-seed0-results
-          path: experiments/cifar10_three_loss/results
+          path: |
+            experiments/cifar10_three_loss/results
+            experiments/cifar10_three_loss/training.log
           if-no-files-found: warn
           retention-days: 14
 
@@ -112,9 +112,15 @@ jobs:
           pattern: cifar10-*-seed0-results
           path: downloaded
 
-      - name: Print and save concise combined summary
+      - name: Print diagnostics and aggregate completed results
         shell: bash
         run: |
+          set -e
+          echo '=== METHOD LOG TAILS ==='
+          find downloaded -name training.log -print0 | sort -z | while IFS= read -r -d '' log; do
+            echo "--- $log ---"
+            tail -n 30 "$log"
+          done
           python - <<'PY'
           import csv
           import json
@@ -123,12 +129,7 @@ jobs:
           summaries = []
           for path in sorted(Path('downloaded').rglob('summary.json')):
               payload = json.loads(path.read_text())
-              if isinstance(payload, dict) and 'summaries' in payload:
-                  summaries.extend(payload['summaries'])
-              elif isinstance(payload, list):
-                  summaries.extend(payload)
-              else:
-                  summaries.append(payload)
+              summaries.extend(payload if isinstance(payload, list) else [payload])
           summaries.sort(key=lambda row: row.get('method', ''))
           Path('combined_summaries.json').write_text(
               json.dumps(summaries, indent=2, sort_keys=True) + '\n'
@@ -150,14 +151,16 @@ jobs:
           print('COMBINED_FINAL_SUMMARY')
           print(json.dumps(summaries, indent=2, sort_keys=True))
           if len(summaries) != 3:
-              raise SystemExit(f'Expected 3 summaries, found {len(summaries)}')
+              raise SystemExit(f'Expected 3 successful summaries, found {len(summaries)}')
           PY
 
       - name: Upload combined result
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: cifar10-three-method-combined-seed0
           path: |
             combined_summaries.json
             combined_summaries.csv
+          if-no-files-found: warn
           retention-days: 14
