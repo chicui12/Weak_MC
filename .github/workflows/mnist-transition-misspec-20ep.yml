@@ -33,8 +33,11 @@ jobs:
         run: |
           set -euxo pipefail
           cd experiments/mnist_transition_misspec
-          base64 --decode mnist_misspec_code.zip.b64 > source.zip
-          mkdir source
+          cat chunks/chunk_* > source.b64
+          test "$(wc -c < source.b64)" -eq 29920
+          base64 --decode source.b64 > source.zip
+          unzip -t source.zip
+          mkdir -p source
           unzip -q source.zip -d source
 
       - name: Install dependencies
@@ -74,121 +77,8 @@ jobs:
             --deterministic \
             --overwrite | tee run.log
 
-      - name: Build combined tables, figures, and report
-        shell: bash
-        working-directory: experiments/mnist_transition_misspec/source
-        run: |
-          set -euxo pipefail
-          python - <<'PY'
-          from __future__ import annotations
-
-          import csv
-          import json
-          from pathlib import Path
-
-          import matplotlib.pyplot as plt
-
-          methods = ("ishida_ga", "scarce", "clwl")
-          labels = {
-              "ishida_ga": "Ishida-GA",
-              "scarce": "SCARCE",
-              "clwl": "CLWL",
-          }
-          base = Path("outputs/mnist_semantic_pair_tilt_s0p3_assumed_uniform/mlp_784_500_10")
-          rows_by_method = {}
-          for method in methods:
-              path = base / method / "seed_0" / "metrics.csv"
-              with path.open(newline="", encoding="utf-8") as handle:
-                  rows_by_method[method] = list(csv.DictReader(handle))
-
-          wide_path = base / "epoch_by_epoch_seed_0.csv"
-          fields = ["epoch"]
-          for method in methods:
-              fields += [
-                  f"{method}_train_objective",
-                  f"{method}_clean_train_acc",
-                  f"{method}_clean_test_acc",
-                  f"{method}_correction_active",
-              ]
-          with wide_path.open("w", newline="", encoding="utf-8") as handle:
-              writer = csv.DictWriter(handle, fieldnames=fields)
-              writer.writeheader()
-              for index in range(len(rows_by_method[methods[0]])):
-                  output = {"epoch": int(rows_by_method[methods[0]][index]["epoch"])}
-                  for method in methods:
-                      row = rows_by_method[method][index]
-                      output[f"{method}_train_objective"] = row["train_objective"]
-                      output[f"{method}_clean_train_acc"] = row["clean_train_acc"]
-                      output[f"{method}_clean_test_acc"] = row["clean_test_acc"]
-                      output[f"{method}_correction_active"] = row["correction_active"]
-                  writer.writerow(output)
-
-          for metric, ylabel, filename in (
-              ("clean_train_acc", "Clean training accuracy", "train_accuracy.png"),
-              ("clean_test_acc", "Clean test accuracy", "test_accuracy.png"),
-          ):
-              plt.figure(figsize=(7.2, 4.8))
-              for method in methods:
-                  x = [int(r["epoch"]) for r in rows_by_method[method]]
-                  y = [float(r[metric]) for r in rows_by_method[method]]
-                  plt.plot(x, y, marker="o", markersize=3, label=labels[method])
-              plt.xlabel("Epoch")
-              plt.ylabel(ylabel)
-              plt.xticks(range(1, 21))
-              plt.ylim(0.0, 1.0)
-              plt.grid(alpha=0.25)
-              plt.legend()
-              plt.tight_layout()
-              plt.savefig(base / filename, dpi=180)
-              plt.close()
-
-          with (base / "comparison_seed_0.csv").open(newline="", encoding="utf-8") as handle:
-              comparison = list(csv.DictReader(handle))
-          with (base / "transition_diagnostics.json").open(encoding="utf-8") as handle:
-              diagnostics = json.load(handle)
-
-          report = [
-              "# MNIST: small transition-matrix misspecification",
-              "",
-              "## Error model",
-              "",
-              "The learner assumes a uniform complementary-label transition. The actual annotation policy uses a mild multiplicative tilt toward one visually plausible hard-negative digit for each class: 0↔6, 1↔7, 2↔3, 4↔9, and 5↔8. The tilt strength is s=0.30. The true transition remains zero-diagonal, column-stochastic, row-stochastic, and full rank.",
-              "",
-              f"- Uniform wrong-class probability: {diagnostics['uniform_wrong_class_probability']:.6f}",
-              f"- Paired-confuser probability: {diagnostics['preferred_confuser_probability']:.6f}",
-              f"- Other wrong-class probability: {diagnostics['other_wrong_class_probability']:.6f}",
-              f"- Mean column total-variation distance: {diagnostics['column_total_variation_mean']:.6f}",
-              f"- Maximum entrywise error: {diagnostics['max_abs_entry_error']:.6f}",
-              f"- CLWL induced true-transition pair-order preservation rate: {diagnostics['clwl_induced_true_random_pair_order_rate']:.6f}",
-              "",
-              "## Protocol",
-              "",
-              "One paired seed (model seed 0, weak-label seed 0), MNIST 784-500-10 ReLU MLP, AdamW, learning rate 1e-3, weight decay 1e-4, batch size 128, 20 epochs. All methods receive exactly the same images, sampled weak labels, initialization, and complementary-class-balanced minibatches.",
-              "",
-              "## Results",
-              "",
-              "| Method | Epoch-20 train acc. | Epoch-20 test acc. | Mean test acc., epochs 11-20 | Best test acc.* |",
-              "|---|---:|---:|---:|---:|",
-          ]
-          for row in comparison:
-              report.append(
-                  f"| {labels[row['method']]} | {100*float(row['final_clean_train_acc']):.2f}% | "
-                  f"{100*float(row['final_clean_test_acc']):.2f}% | "
-                  f"{100*float(row['last10_clean_test_acc_mean']):.2f}% | "
-                  f"{100*float(row['best_test_acc_diagnostic_only']):.2f}% (epoch {row['best_test_epoch_diagnostic_only']}) |"
-              )
-          report += [
-              "",
-              "*Best test accuracy is diagnostic only; the epoch-20 model is the saved model and the test set is not used for checkpoint selection.*",
-              "",
-              "See `epoch_by_epoch_seed_0.csv` for all 20 epochs and method-specific `metrics.csv` files for correction diagnostics.",
-          ]
-          (base / "RESULTS.md").write_text("\n".join(report) + "\n", encoding="utf-8")
-          print("Wrote", wide_path)
-          print("Wrote", base / "RESULTS.md")
-          PY
-
       - name: Archive complete experiment
+        if: success()
         shell: bash
         working-directory: experiments/mnist_transition_misspec/source
         run: |
