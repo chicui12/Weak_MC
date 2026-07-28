@@ -1,0 +1,99 @@
+name: MNIST transition misspecification (20 epochs)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "experiments/mnist_transition_misspec/**"
+      - ".github/workflows/mnist-transition-misspec-20ep.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+      PYTHONHASHSEED: "0"
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Decode experiment source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd experiments/mnist_transition_misspec
+          cat chunks/chunk_* > source.b64
+          test "$(wc -c < source.b64)" -eq 29920
+          base64 --decode source.b64 > source.zip
+          unzip -t source.zip
+          mkdir -p source
+          unzip -q source.zip -d source
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.5.1 torchvision==0.20.1
+          python -m pip install numpy==1.26.4 pytest==8.3.5 matplotlib==3.10.1
+
+      - name: Run mathematical and implementation tests
+        shell: bash
+        working-directory: experiments/mnist_transition_misspec/source
+        run: |
+          set -euxo pipefail
+          PYTHONPATH=. python -m pytest -q
+
+      - name: Run paired 20-epoch benchmark
+        shell: bash
+        working-directory: experiments/mnist_transition_misspec/source
+        run: |
+          set -euxo pipefail
+          python run_experiment.py \
+            --method all \
+            --seed 0 \
+            --label-seed 0 \
+            --epochs 20 \
+            --batch-size 128 \
+            --learning-rate 0.001 \
+            --weight-decay 0.0001 \
+            --hidden-dim 500 \
+            --misspec-strength 0.90 \
+            --device cpu \
+            --data-root ./data \
+            --output-root ./outputs \
+            --download \
+            --deterministic \
+            --overwrite | tee run.log
+
+      - name: Archive complete experiment
+        if: success()
+        shell: bash
+        working-directory: experiments/mnist_transition_misspec/source
+        run: |
+          set -euxo pipefail
+          zip -q -r mnist_transition_misspec_s0p9_20ep_results.zip \
+            outputs run.log run_experiment.py weaklabel_benchmark tests requirements.txt
+
+      - name: Upload experiment artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnist-transition-misspec-s0p9-20ep-seed0
+          path: |
+            experiments/mnist_transition_misspec/source/mnist_transition_misspec_s0p9_20ep_results.zip
+            experiments/mnist_transition_misspec/source/outputs
+            experiments/mnist_transition_misspec/source/run.log
+          if-no-files-found: warn
+          retention-days: 14
